@@ -1,0 +1,20 @@
+[project]
+name = "toc-viewer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Cheng, Tiejun", email = "chengt2@ncbi.nlm.nih.gov" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "textual",
+]
+
+[project.scripts]
+toc-viewer = "toc_viewer:main"
+tv = "toc_viewer:main"
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
