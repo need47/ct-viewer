@@ -12,7 +12,7 @@ from xml.dom import minidom
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Static, TextArea, Tree
+from textual.widgets import Footer, Header, Input, Static, TextArea, Tree
 
 
 @dataclass(slots=True)
@@ -40,6 +40,7 @@ class SectionMetadata:
         url: Section URL.
     """
 
+    label: str
     description: str | None
     url: str | None
     display_controls_xml: str | None
@@ -220,6 +221,7 @@ def _add_nodes(parent: Tree[SectionMetadata | None].Node, nodes: list[TocNode]) 
 
     for node in nodes:
         metadata = SectionMetadata(
+            label=node.label,
             description=node.description,
             url=node.url,
             display_controls_xml=node.display_controls_xml,
@@ -276,11 +278,59 @@ def _has_expanded_descendant(node: Tree[None].Node) -> bool:
     return False
 
 
+def _iter_tree_nodes(node: Tree[SectionMetadata | None].Node) -> list[Tree[SectionMetadata | None].Node]:
+    """Return a depth-first list of nodes starting from the given node.
+
+    Args:
+        node: Root node to traverse.
+
+    Returns:
+        List of nodes in depth-first order.
+    """
+
+    nodes = [node]
+    for child in node.children:
+        nodes.extend(_iter_tree_nodes(child))
+    return nodes
+
+
+def _node_label_text(node: Tree[SectionMetadata | None].Node) -> str:
+    """Return the plain label text for a tree node.
+
+    Args:
+        node: Tree node to read.
+
+    Returns:
+        The label text for the node.
+    """
+
+    if node.data is not None:
+        return node.data.label
+    return str(node.label)
+
+
+def _expand_ancestors(node: Tree[SectionMetadata | None].Node) -> None:
+    """Expand all ancestors of a node to ensure it is visible.
+
+    Args:
+        node: Tree node whose ancestors should be expanded.
+    """
+
+    current = node.parent
+    while current is not None:
+        current.expand()
+        current = current.parent
+
+
 class TOCTreeViewer(App):
     """Textual application that renders TOC sections in a tree widget."""
 
     TITLE = "TOC Tree Viewer"
-    BINDINGS = [("q", "quit", "Quit"), ("z", "expand_all", "Fold/Unfold")]
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("z", "expand_all", "Fold/Unfold"),
+        ("/", "search", "Search"),
+    ]
     CSS = """
         Horizontal {
             height: 1fr;
@@ -294,6 +344,10 @@ class TOCTreeViewer(App):
             width: 30%;
             padding: 1;
             border: round $primary;
+        }
+
+        #search-input {
+            margin-bottom: 1;
         }
 
         #display-controls {
@@ -311,14 +365,27 @@ class TOCTreeViewer(App):
 
         super().__init__()
         self._toc_root = toc_root
+        self._search_query: str | None = None
+        self._search_results: list[Tree[SectionMetadata | None].Node] = []
+        self._search_index = -1
 
     def compose(self) -> ComposeResult:
         """Compose top-level UI widgets."""
 
         yield Header(show_clock=True)
         tree = Tree[SectionMetadata | None](self._toc_root.label, id="toc-tree")
+        tree.root.data = SectionMetadata(
+            label=self._toc_root.label,
+            description=self._toc_root.description,
+            url=self._toc_root.url,
+            display_controls_xml=self._toc_root.display_controls_xml,
+        )
         _add_nodes(tree.root, self._toc_root.children)
         tree.root.expand()
+        search_input = Input(
+            placeholder="Search...",
+            id="search-input",
+        )
         metadata_text = Static("", id="metadata-text", markup=True)
         metadata_text.update(self._format_metadata(None))
         display_controls = TextArea("", id="display-controls", language="xml")
@@ -327,6 +394,7 @@ class TOCTreeViewer(App):
         with Horizontal():
             yield tree
             with Vertical(id="metadata-panel"):
+                yield search_input
                 yield metadata_text
                 yield display_controls
         yield Footer()
@@ -342,6 +410,29 @@ class TOCTreeViewer(App):
         else:
             _expand_node_recursively(node)
 
+    def action_search(self) -> None:
+        """Focus the search input for querying tree nodes."""
+
+        search_input = self.query_one("#search-input", Input)
+        search_input.focus()
+        search_input.cursor_position = len(search_input.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle submitted search input.
+
+        Args:
+            event: Submitted input event.
+        """
+
+        if event.input.id != "search-input":
+            return
+
+        query = event.value.strip()
+        if not query:
+            return
+
+        self._run_search(query)
+
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[SectionMetadata | None]) -> None:
         """Update the metadata panel when a tree node is highlighted.
 
@@ -353,6 +444,38 @@ class TOCTreeViewer(App):
         display_controls = self.query_one("#display-controls", TextArea)
         metadata_text.update(self._format_metadata(event.node.data))
         display_controls.text = self._format_display_controls(event.node.data)
+
+    def _run_search(self, query: str) -> None:
+        """Search the tree for nodes containing the query and select the next match.
+
+        Args:
+            query: Search query string.
+        """
+
+        tree = self.query_one("#toc-tree", Tree)
+        nodes = _iter_tree_nodes(tree.root)
+        lowered = query.casefold()
+        matches = [node for node in nodes if lowered in _node_label_text(node).casefold()]
+
+        if not matches:
+            return
+
+        if query == self._search_query:
+            self._search_index = (self._search_index + 1) % len(matches)
+        else:
+            self._search_query = query
+            self._search_index = 0
+
+        self._search_results = matches
+        target = matches[self._search_index]
+        _expand_ancestors(target)
+
+        if hasattr(tree, "select_node"):
+            tree.select_node(target)
+        else:
+            tree.cursor_node = target
+
+        tree.refresh()
 
     @staticmethod
     def _format_metadata(metadata: SectionMetadata | None) -> str:
