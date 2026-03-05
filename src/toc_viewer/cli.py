@@ -371,8 +371,10 @@ class TOCTreeViewer(App):
 
     def compose(self) -> ComposeResult:
         """Compose top-level UI widgets."""
-
+        # Header
         yield Header(show_clock=True)
+
+        # Tree
         tree = Tree[SectionMetadata | None](self._toc_root.label, id="toc-tree")
         tree.root.data = SectionMetadata(
             label=self._toc_root.label,
@@ -382,21 +384,31 @@ class TOCTreeViewer(App):
         )
         _add_nodes(tree.root, self._toc_root.children)
         tree.root.expand()
+
+        # Search
         search_input = Input(
             placeholder="Search...",
             id="search-input",
         )
+
+        # Description and URL
         metadata_text = Static("", id="metadata-text", markup=True)
         metadata_text.update(self._format_metadata(None))
+
+        # DisplayControls XML
         display_controls = TextArea("", id="display-controls", language="xml")
         display_controls.read_only = True
         display_controls.text = self._format_display_controls(None)
+
+        # Layout
         with Horizontal():
             yield tree
             with Vertical(id="metadata-panel"):
                 yield search_input
                 yield metadata_text
                 yield display_controls
+
+        # Footer
         yield Footer()
 
     def action_expand_all(self) -> None:
