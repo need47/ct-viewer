@@ -258,9 +258,7 @@ def _parse_flat_node(node_element: ET.Element, include_xrefs: bool = True) -> Fl
         raise ValueError("Each Node element must contain a NodeID.")
 
     parent_ids = [
-        parent_id
-        for parent in _find_children(node_element, "ParentID")
-        if (parent_id := (parent.text or "").strip())
+        parent_id for parent in _find_children(node_element, "ParentID") if (parent_id := (parent.text or "").strip())
     ]
     information = _find_first_child(node_element, "Information")
     parsed = _parse_information(information)
@@ -502,10 +500,10 @@ def _expand_ancestors(node: Tree[NodeMetadata | None].Node) -> None:
         current = current.parent
 
 
-class TOCTreeViewer(App):
+class ClassificationViewer(App):
     """Textual application that renders hierarchy nodes in a tree widget."""
 
-    TITLE = "Hierarchy Tree Viewer"
+    TITLE = "Classification Viewer"
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("z", "expand_all", "Fold/Unfold"),
@@ -747,9 +745,7 @@ class TOCTreeViewer(App):
         if not visible_details:
             return ""
 
-        return "\n\n".join(
-            f"[{label_style}]{field_name}[/]\n{escape(value)}" for field_name, value in visible_details
-        )
+        return "\n\n".join(f"[{label_style}]{field_name}[/]\n{escape(value)}" for field_name, value in visible_details)
 
     def _update_xref_controls(self, metadata: NodeMetadata | None) -> None:
         """Refresh the xref selector and values panel for the highlighted node.
@@ -800,8 +796,8 @@ class TOCTreeViewer(App):
 def _build_argument_parser() -> argparse.ArgumentParser:
     """Create and configure the command-line argument parser."""
 
-    parser = argparse.ArgumentParser(description="Display hierarchy XML as an interactive tree.")
-    parser.add_argument("xml_file", help="Path to the hierarchy XML file")
+    parser = argparse.ArgumentParser(description="Display classification XML as an interactive tree.")
+    parser.add_argument("xml_file", help="Path to the classification XML file")
     parser.add_argument(
         "-X",
         "--exclude-xrefs",
@@ -812,7 +808,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Run the hierarchy tree viewer TUI."""
+    """Run the classification viewer TUI."""
 
     args = _build_argument_parser().parse_args()
     xml_path = Path(args.xml_file)
@@ -823,5 +819,5 @@ def main() -> None:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    app = TOCTreeViewer(toc_root, include_xrefs=not args.exclude_xrefs)
+    app = ClassificationViewer(toc_root, include_xrefs=not args.exclude_xrefs)
     app.run()

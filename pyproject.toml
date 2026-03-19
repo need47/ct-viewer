@@ -1,10 +1,10 @@
 [project]
 name = "ct-viewer"
 version = "0.1.0"
-description = "Add your description here"
+description = "TUI for viewing PubChem classification XML files"
 readme = "README.md"
 authors = [
-    { name = "Cheng, Tiejun", email = "chengt2@ncbi.nlm.nih.gov" }
+    { name = "Tiejun Cheng", email = "need47@gmail.com" }
 ]
 requires-python = ">=3.13"
 dependencies = [
