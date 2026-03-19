@@ -1,5 +1,5 @@
 [project]
-name = "toc-viewer"
+name = "ct-viewer"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -12,8 +12,8 @@ dependencies = [
 ]
 
 [project.scripts]
-toc-viewer = "toc_viewer:main"
-tv = "toc_viewer:main"
+ct-viewer = "ct_viewer:main"
+cv = "ct_viewer:main"
 
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
