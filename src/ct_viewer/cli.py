@@ -21,6 +21,7 @@ class NodeMetadata:
 
     Args:
         node_id: Identifier for the current node.
+        parent_ids: Parent identifiers for the current node.
         label: Display name for the hierarchy or node.
         description: Long-form description text.
         comments: Additional comments text.
@@ -33,6 +34,7 @@ class NodeMetadata:
     """
 
     node_id: str | None = None
+    parent_ids: list[str] = field(default_factory=list)
     label: str = ""
     description: str | None = None
     comments: str | None = None
@@ -265,6 +267,7 @@ def _parse_flat_node(node_element: ET.Element, include_xrefs: bool = True) -> Fl
     xrefs = _parse_xrefs(_find_first_child(node_element, "XRefs")) if include_xrefs else {}
     metadata = NodeMetadata(
         node_id=node_id,
+        parent_ids=parent_ids,
         label=parsed["label"] or node_id,
         description=parsed["description"],
         comments=parsed["comments"],
@@ -717,6 +720,7 @@ class ClassificationViewer(App):
         label_style = "bold #4ea1ff"
         details: list[tuple[str, str | None]] = [
             ("NodeID", metadata.node_id),
+            ("ParentID", "\n".join(metadata.parent_ids) if metadata.parent_ids else None),
             ("Name", metadata.label),
             ("Description", metadata.description),
             ("Comments", metadata.comments),
