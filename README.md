@@ -7,6 +7,8 @@ It is intended for PubChem-style hierarchy documents and works with XML rooted a
 ## Features
 
 - Interactive tree viewer for hierarchy XML
+- Streaming XML parsing for faster, lower-memory startup on large files
+- Lazy tree rendering so only expanded branches are materialized in the UI
 - Search by node label from inside the TUI
 - Expand or collapse the current subtree with a single key
 - Metadata panel for hierarchy and node details

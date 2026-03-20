@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -47,7 +48,7 @@ class NodeMetadata:
 
 
 @dataclass(slots=True)
-class TocNode:
+class Node:
     """Represents a hierarchy node used to populate the UI tree.
 
     Args:
@@ -56,11 +57,11 @@ class TocNode:
     """
 
     metadata: NodeMetadata
-    children: list["TocNode"] = field(default_factory=list)
+    children: list["Node"] = field(default_factory=list)
 
 
 @dataclass(slots=True)
-class FlatHierarchyNode:
+class FlatNode:
     """Flat node parsed from XML before parent-child reconstruction.
 
     Args:
@@ -241,7 +242,7 @@ def _parse_xrefs(xrefs_element: ET.Element | None) -> dict[str, list[str]]:
     return {xref_type: values for xref_type, values in grouped_values.items() if values}
 
 
-def _parse_flat_node(node_element: ET.Element, include_xrefs: bool = True) -> FlatHierarchyNode:
+def _parse_flat_node(node_element: ET.Element, include_xrefs: bool = True) -> FlatNode:
     """Parse a flat ``Node`` XML element.
 
     Args:
@@ -274,80 +275,18 @@ def _parse_flat_node(node_element: ET.Element, include_xrefs: bool = True) -> Fl
         url=parsed["url"],
         xrefs=xrefs,
     )
-    return FlatHierarchyNode(node_id=node_id, parent_ids=parent_ids, metadata=metadata)
+    return FlatNode(node_id=node_id, parent_ids=parent_ids, metadata=metadata)
 
 
-def _build_hierarchy_children(
-    parent_id: str,
-    children_by_parent: dict[str, list[str]],
-    nodes_by_id: dict[str, FlatHierarchyNode],
-    attached_node_ids: set[str],
-    active_path: tuple[str, ...] = (),
-) -> list[TocNode]:
-    """Construct tree children recursively from flat node records.
+def _parse_root_metadata(hierarchy_element: ET.Element) -> tuple[str, NodeMetadata]:
+    """Parse metadata for the XML ``Hierarchy`` root element.
 
     Args:
-        parent_id: Parent identifier whose children should be expanded.
-        children_by_parent: Mapping of parent IDs to child node IDs.
-        nodes_by_id: Parsed flat nodes indexed by ``NodeID``.
-        attached_node_ids: Accumulator for nodes reachable from the root hierarchy.
-        active_path: Node IDs already present in the current recursion path.
+        hierarchy_element: XML element with local name ``Hierarchy``.
 
     Returns:
-        Hierarchical child nodes in document order.
+        A tuple containing the root identifier and display metadata.
     """
-
-    children: list[TocNode] = []
-    for child_id in children_by_parent.get(parent_id, []):
-        if child_id in active_path:
-            continue
-
-        record = nodes_by_id[child_id]
-        attached_node_ids.add(child_id)
-        descendants = _build_hierarchy_children(
-            child_id,
-            children_by_parent,
-            nodes_by_id,
-            attached_node_ids,
-            active_path + (child_id,),
-        )
-        children.append(TocNode(metadata=record.metadata, children=descendants))
-
-    return children
-
-
-def parse_toc_xml(xml_path: Path, include_xrefs: bool = True) -> TocNode:
-    """Parse a hierarchy XML file into a simple tree structure.
-
-    Args:
-        xml_path: Path to input XML file.
-        include_xrefs: Whether to parse node ``XRefs`` values.
-
-    Returns:
-        Root ``TocNode`` representing the XML ``Hierarchy`` element.
-
-    Raises:
-        FileNotFoundError: If ``xml_path`` does not exist.
-        ValueError: If the XML does not contain a ``Hierarchy`` root.
-        ET.ParseError: If XML is malformed.
-    """
-
-    if not xml_path.exists():
-        raise FileNotFoundError(f"XML file not found: {xml_path}")
-
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-
-    root_name = _local_name(root.tag)
-    if root_name == "Hierarchies":
-        hierarchy_element = _find_first_child(root, "Hierarchy")
-    elif root_name == "Hierarchy":
-        hierarchy_element = root
-    else:
-        hierarchy_element = None
-
-    if hierarchy_element is None:
-        raise ValueError("The XML must contain a Hierarchy element under the Hierarchies root.")
 
     root_id = _first_child_text(hierarchy_element, "RootID") or "root"
     information = _find_first_child(hierarchy_element, "Information")
@@ -363,18 +302,128 @@ def parse_toc_xml(xml_path: Path, include_xrefs: bool = True) -> TocNode:
         license_url=_first_child_text(hierarchy_element, "LicenseURL"),
         xrefs={},
     )
+    return root_id, root_metadata
 
-    flat_nodes: list[FlatHierarchyNode] = []
-    for child in hierarchy_element:
-        if _local_name(child.tag) == "Node":
-            flat_nodes.append(_parse_flat_node(child, include_xrefs=include_xrefs))
+
+def _stream_hierarchy(xml_path: Path, include_xrefs: bool) -> tuple[str, NodeMetadata, list[FlatNode]]:
+    """Stream the first hierarchy from XML while releasing parsed node elements.
+
+    Args:
+        xml_path: Path to input XML file.
+        include_xrefs: Whether to parse node ``XRefs`` values.
+
+    Returns:
+        The root identifier, root metadata, and parsed flat nodes.
+
+    Raises:
+        ValueError: If the XML does not contain a ``Hierarchy`` element.
+        ET.ParseError: If the XML is malformed.
+    """
+
+    flat_nodes: list[FlatNode] = []
+    element_stack: list[ET.Element] = []
+    target_hierarchy: ET.Element | None = None
+    root_id: str | None = None
+    root_metadata: NodeMetadata | None = None
+
+    for event, element in ET.iterparse(xml_path, events=("start", "end")):
+        if event == "start":
+            element_stack.append(element)
+            if target_hierarchy is None and _local_name(element.tag) == "Hierarchy":
+                target_hierarchy = element
+            continue
+
+        element_name = _local_name(element.tag)
+
+        if target_hierarchy is not None and element is target_hierarchy and element_name == "Hierarchy":
+            root_id, root_metadata = _parse_root_metadata(element)
+            element_stack.pop()
+            element.clear()
+            break
+
+        if target_hierarchy is not None and element_name == "Node":
+            flat_nodes.append(_parse_flat_node(element, include_xrefs=include_xrefs))
+            element.clear()
+            if len(element_stack) >= 2:
+                element_stack[-2].remove(element)
+
+        element_stack.pop()
+
+    if root_id is None or root_metadata is None:
+        raise ValueError("The XML must contain a Hierarchy element under the Hierarchies root.")
+
+    return root_id, root_metadata, flat_nodes
+
+
+def _build_hierarchy_children(
+    parent_id: str,
+    children_by_parent: dict[str, list[str]],
+    nodes_by_id: dict[str, FlatNode],
+    attached_node_ids: set[str],
+    active_path: set[str] | None = None,
+) -> list[Node]:
+    """Construct tree children recursively from flat node records.
+
+    Args:
+        parent_id: Parent identifier whose children should be expanded.
+        children_by_parent: Mapping of parent IDs to child node IDs.
+        nodes_by_id: Parsed flat nodes indexed by ``NodeID``.
+        attached_node_ids: Accumulator for nodes reachable from the root hierarchy.
+        active_path: Node IDs already present in the current recursion path.
+
+    Returns:
+        Hierarchical child nodes in document order.
+    """
+
+    active_path = set() if active_path is None else active_path
+    children: list[Node] = []
+    for child_id in children_by_parent.get(parent_id, []):
+        if child_id in active_path:
+            continue
+
+        record = nodes_by_id[child_id]
+        attached_node_ids.add(child_id)
+        active_path.add(child_id)
+        descendants = _build_hierarchy_children(
+            child_id,
+            children_by_parent,
+            nodes_by_id,
+            attached_node_ids,
+            active_path,
+        )
+        active_path.remove(child_id)
+        children.append(Node(metadata=record.metadata, children=descendants))
+
+    return children
+
+
+def parse_toc_xml(xml_path: Path, include_xrefs: bool = True) -> Node:
+    """Parse a hierarchy XML file into a simple tree structure.
+
+    Args:
+        xml_path: Path to input XML file.
+        include_xrefs: Whether to parse node ``XRefs`` values.
+
+    Returns:
+        Root ``Node`` representing the XML ``Hierarchy`` element.
+
+    Raises:
+        FileNotFoundError: If ``xml_path`` does not exist.
+        ValueError: If the XML does not contain a ``Hierarchy`` root.
+        ET.ParseError: If XML is malformed.
+    """
+
+    if not xml_path.exists():
+        raise FileNotFoundError(f"XML file not found: {xml_path}")
+
+    root_id, root_metadata, flat_nodes = _stream_hierarchy(xml_path, include_xrefs=include_xrefs)
 
     nodes_by_id = {node.node_id: node for node in flat_nodes}
-    children_by_parent: dict[str, list[str]] = {}
+    children_by_parent: dict[str, list[str]] = defaultdict(list)
     for node in flat_nodes:
         parent_ids = node.parent_ids or [root_id]
         for parent_id in parent_ids:
-            children_by_parent.setdefault(parent_id, []).append(node.node_id)
+            children_by_parent[parent_id].append(node.node_id)
 
     attached_node_ids: set[str] = set()
     root_children = _build_hierarchy_children(root_id, children_by_parent, nodes_by_id, attached_node_ids)
@@ -383,40 +432,54 @@ def parse_toc_xml(xml_path: Path, include_xrefs: bool = True) -> TocNode:
         if node.node_id in attached_node_ids:
             continue
         root_children.append(
-            TocNode(
+            Node(
                 metadata=node.metadata,
                 children=_build_hierarchy_children(
                     node.node_id,
                     children_by_parent,
                     nodes_by_id,
                     attached_node_ids,
-                    (node.node_id,),
+                    {node.node_id},
                 ),
             )
         )
 
-    return TocNode(metadata=root_metadata, children=root_children)
+    return Node(metadata=root_metadata, children=root_children)
 
 
-def _add_nodes(parent: Tree[NodeMetadata | None].Node, nodes: list[TocNode]) -> None:
-    """Populate a Textual tree node recursively.
+def _walk_toc_nodes(root: Node) -> Iterator[tuple[Node, Node | None]]:
+    """Yield tree nodes with their parent in depth-first order.
 
     Args:
-        parent: Parent Textual tree node.
-        nodes: Child nodes to insert under the parent.
+        root: Root hierarchy node.
+
+    Yields:
+        Tuples of ``(node, parent)`` for the full hierarchy.
     """
 
-    for node in nodes:
-        if not node.children:
-            parent.add_leaf(node.metadata.label, data=node.metadata)
-            continue
+    stack: list[tuple[Node, Node | None]] = [(root, None)]
+    while stack:
+        node, parent = stack.pop()
+        yield node, parent
+        for child in reversed(node.children):
+            stack.append((child, node))
 
-        child = parent.add(node.metadata.label, data=node.metadata)
-        _add_nodes(child, node.children)
+
+def _toc_label_text(node: Node) -> str:
+    """Return the display label for a parsed hierarchy node.
+
+    Args:
+        node: Parsed hierarchy node.
+
+    Returns:
+        The label shown in the tree.
+    """
+
+    return node.metadata.label
 
 
-def _expand_node_recursively(node: Tree[None].Node) -> None:
-    """Expand a tree node and all of its descendants.
+def _expand_node_recursively(node: Tree[Node].Node) -> None:
+    """Expand a rendered tree node and all currently materialized descendants.
 
     Args:
         node: The tree node from which recursive expansion starts.
@@ -427,7 +490,7 @@ def _expand_node_recursively(node: Tree[None].Node) -> None:
         _expand_node_recursively(child)
 
 
-def _collapse_node_recursively(node: Tree[None].Node) -> None:
+def _collapse_node_recursively(node: Tree[Node].Node) -> None:
     """Collapse all descendants of a tree node.
 
     Args:
@@ -441,7 +504,7 @@ def _collapse_node_recursively(node: Tree[None].Node) -> None:
     node.collapse()
 
 
-def _has_expanded_descendant(node: Tree[None].Node) -> bool:
+def _has_expanded_descendant(node: Tree[Node].Node) -> bool:
     """Check whether a node has any expanded descendants.
 
     Args:
@@ -459,38 +522,7 @@ def _has_expanded_descendant(node: Tree[None].Node) -> bool:
     return False
 
 
-def _iter_tree_nodes(node: Tree[NodeMetadata | None].Node) -> list[Tree[NodeMetadata | None].Node]:
-    """Return a depth-first list of nodes starting from the given node.
-
-    Args:
-        node: Root node to traverse.
-
-    Returns:
-        List of nodes in depth-first order.
-    """
-
-    nodes = [node]
-    for child in node.children:
-        nodes.extend(_iter_tree_nodes(child))
-    return nodes
-
-
-def _node_label_text(node: Tree[NodeMetadata | None].Node) -> str:
-    """Return the plain label text for a tree node.
-
-    Args:
-        node: Tree node to read.
-
-    Returns:
-        The label text for the node.
-    """
-
-    if node.data is not None:
-        return node.data.label
-    return str(node.label)
-
-
-def _expand_ancestors(node: Tree[NodeMetadata | None].Node) -> None:
+def _expand_ancestors(node: Tree[Node].Node) -> None:
     """Expand all ancestors of a node to ensure it is visible.
 
     Args:
@@ -547,7 +579,7 @@ class ClassificationViewer(App):
         }
     """
 
-    def __init__(self, toc_root: TocNode, include_xrefs: bool = True) -> None:
+    def __init__(self, toc_root: Node, include_xrefs: bool = True) -> None:
         """Initialize the tree viewer application.
 
         Args:
@@ -559,9 +591,17 @@ class ClassificationViewer(App):
         self._toc_root = toc_root
         self._include_xrefs = include_xrefs
         self._search_query: str | None = None
-        self._search_results: list[Tree[NodeMetadata | None].Node] = []
+        self._search_results: list[Node] = []
         self._search_index = -1
         self._current_metadata: NodeMetadata | None = toc_root.metadata
+        self._rendered_nodes: dict[int, Tree[Node].Node] = {}
+        self._populated_toc_nodes: set[int] = set()
+        self._toc_parents: dict[int, Node | None] = {}
+        self._searchable_nodes: list[Node] = []
+
+        for node, parent in _walk_toc_nodes(toc_root):
+            self._searchable_nodes.append(node)
+            self._toc_parents[id(node)] = parent
 
     def compose(self) -> ComposeResult:
         """Compose top-level UI widgets."""
@@ -569,9 +609,10 @@ class ClassificationViewer(App):
         yield Header(show_clock=True)
 
         # Tree
-        tree = Tree[NodeMetadata | None](self._toc_root.metadata.label, id="toc-tree")
-        tree.root.data = self._toc_root.metadata
-        _add_nodes(tree.root, self._toc_root.children)
+        tree = Tree[Node](self._toc_root.metadata.label, id="toc-tree")
+        tree.root.data = self._toc_root
+        self._rendered_nodes[id(self._toc_root)] = tree.root
+        self._populate_tree_node(tree.root, self._toc_root)
         tree.root.expand()
 
         # Search
@@ -615,6 +656,7 @@ class ClassificationViewer(App):
         if _has_expanded_descendant(node):
             _collapse_node_recursively(node)
         else:
+            self._populate_descendants(node)
             _expand_node_recursively(node)
 
     def action_search(self) -> None:
@@ -640,7 +682,20 @@ class ClassificationViewer(App):
 
         self._run_search(query)
 
-    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[NodeMetadata | None]) -> None:
+    def on_tree_node_expanded(self, event: Tree.NodeExpanded[Node]) -> None:
+        """Populate child widgets lazily when a tree node expands.
+
+        Args:
+            event: Expansion event for the current node.
+        """
+
+        toc_node = event.node.data
+        if toc_node is None:
+            return
+
+        self._populate_tree_node(event.node, toc_node)
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[Node]) -> None:
         """Update the metadata panel when a tree node is highlighted.
 
         Args:
@@ -648,7 +703,7 @@ class ClassificationViewer(App):
         """
 
         metadata_text = self.query_one("#metadata-text", Static)
-        metadata = event.node.data
+        metadata = event.node.data.metadata if event.node.data is not None else None
         metadata_text.update(self._format_metadata(metadata))
         self._current_metadata = metadata
         if self._include_xrefs:
@@ -679,9 +734,8 @@ class ClassificationViewer(App):
         """
 
         tree = self.query_one("#toc-tree", Tree)
-        nodes = _iter_tree_nodes(tree.root)
         lowered = query.casefold()
-        matches = [node for node in nodes if lowered in _node_label_text(node).casefold()]
+        matches = [node for node in self._searchable_nodes if lowered in _toc_label_text(node).casefold()]
 
         if not matches:
             return
@@ -693,7 +747,10 @@ class ClassificationViewer(App):
             self._search_index = 0
 
         self._search_results = matches
-        target = matches[self._search_index]
+        target = self._ensure_tree_node(matches[self._search_index])
+        if target is None:
+            return
+
         _expand_ancestors(target)
 
         if hasattr(tree, "select_node"):
@@ -701,7 +758,71 @@ class ClassificationViewer(App):
         else:
             tree.cursor_node = target
 
+        if hasattr(tree, "scroll_to_node"):
+            tree.scroll_to_node(target)
         tree.refresh()
+
+    def _populate_tree_node(self, parent: Tree[Node].Node, toc_node: Node) -> None:
+        """Render one level of tree children for a parsed hierarchy node.
+
+        Args:
+            parent: Rendered Textual tree node.
+            toc_node: Parsed hierarchy node backing ``parent``.
+        """
+
+        toc_key = id(toc_node)
+        if toc_key in self._populated_toc_nodes:
+            return
+
+        parent.remove_children()
+        for child in toc_node.children:
+            if child.children:
+                rendered_child = parent.add(child.metadata.label, data=child, allow_expand=True)
+            else:
+                rendered_child = parent.add_leaf(child.metadata.label, data=child)
+            self._rendered_nodes[id(child)] = rendered_child
+
+        self._populated_toc_nodes.add(toc_key)
+
+    def _populate_descendants(self, parent: Tree[Node].Node) -> None:
+        """Materialize the full rendered subtree below a UI node.
+
+        Args:
+            parent: Rendered tree node to expand fully.
+        """
+
+        toc_node = parent.data
+        if toc_node is None:
+            return
+
+        self._populate_tree_node(parent, toc_node)
+        for child in parent.children:
+            self._populate_descendants(child)
+
+    def _ensure_tree_node(self, toc_node: Node) -> Tree[Node].Node | None:
+        """Ensure a parsed node has a corresponding rendered Textual node.
+
+        Args:
+            toc_node: Parsed hierarchy node to locate.
+
+        Returns:
+            The rendered tree node when available.
+        """
+
+        existing = self._rendered_nodes.get(id(toc_node))
+        if existing is not None:
+            return existing
+
+        parent_toc = self._toc_parents.get(id(toc_node))
+        if parent_toc is None:
+            return self._rendered_nodes.get(id(self._toc_root))
+
+        parent_node = self._ensure_tree_node(parent_toc)
+        if parent_node is None:
+            return None
+
+        self._populate_tree_node(parent_node, parent_toc)
+        return self._rendered_nodes.get(id(toc_node))
 
     @staticmethod
     def _format_metadata(metadata: NodeMetadata | None) -> str:
