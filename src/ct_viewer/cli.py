@@ -964,7 +964,9 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o",
         "--output",
-        help="Path to save a text-based tree representation of the hierarchy (for debugging)",
+        const="-",
+        nargs="?",
+        help="Write a flat tab-delimited hierarchy to a file, or to stdout when omitted or set to '-'",
     )
     return parser
 
@@ -982,7 +984,7 @@ def main() -> None:
         raise SystemExit(2) from exc
 
     if args.output:
-        output_path = Path(args.output)
+        output_path = None if args.output == "-" else Path(args.output)
         return root.output_flat(output_path)
 
     app = ClassificationViewer(root, include_xrefs=not args.exclude_xrefs)

@@ -47,6 +47,18 @@ To skip parsing `XRefs` for faster startup on large files:
 cv path/to/hierarchy.xml --exclude-xrefs
 ```
 
+To write the flat tab-delimited hierarchy to standard output:
+
+```bash
+cv path/to/hierarchy.xml --output
+```
+
+You can also pass `-` explicitly:
+
+```bash
+cv path/to/hierarchy.xml --output -
+```
+
 ## Keyboard shortcuts
 
 - `q`: quit
