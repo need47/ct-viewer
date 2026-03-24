@@ -59,6 +59,36 @@ class Node:
     metadata: NodeMetadata
     children: list["Node"] = field(default_factory=list)
 
+    def output_flat(self, output_path: Path | None = None) -> None:
+        """Write the hierarchy as flat tab-delimited rows.
+
+        Args:
+            output_path: Destination path. When ``None``, write to standard
+                output.
+        """
+
+        text = "\n".join(self._iter_flat_lines()) + "\n"
+        if output_path is None:
+            sys.stdout.write(text)
+            return
+
+        output_path.write_text(text, encoding="utf-8")
+
+    def _iter_flat_lines(self) -> list[str]:
+        """Render the node subtree in pre-order flat rows.
+
+        Returns:
+            list[str]: One tab-delimited row per node.
+        """
+
+        node_id = self.metadata.node_id or ""
+        parent_ids = "|".join(self.metadata.parent_ids)
+        lines = [f"{node_id}\t{parent_ids}\t{self.metadata.label}"]
+        for child in self.children:
+            lines.extend(child._iter_flat_lines())
+
+        return lines
+
 
 @dataclass(slots=True)
 class FlatNode:
@@ -292,6 +322,8 @@ def _parse_root_metadata(hierarchy_element: ET.Element) -> tuple[str, NodeMetada
     information = _find_first_child(hierarchy_element, "Information")
     parsed_root = _parse_information(information)
     root_metadata = NodeMetadata(
+        node_id=root_id,
+        parent_ids=[],
         label=parsed_root["label"] or _first_child_text(hierarchy_element, "SourceName") or "Hierarchy",
         description=parsed_root["description"],
         comments=parsed_root["comments"],
@@ -579,27 +611,27 @@ class ClassificationViewer(App):
         }
     """
 
-    def __init__(self, toc_root: Node, include_xrefs: bool = True) -> None:
+    def __init__(self, root: Node, include_xrefs: bool = True) -> None:
         """Initialize the tree viewer application.
 
         Args:
-            toc_root: Parsed root node to visualize.
+            root: Parsed root node to visualize.
             include_xrefs: Whether xref widgets should be shown.
         """
 
         super().__init__()
-        self._toc_root = toc_root
+        self._root = root
         self._include_xrefs = include_xrefs
         self._search_query: str | None = None
         self._search_results: list[Node] = []
         self._search_index = -1
-        self._current_metadata: NodeMetadata | None = toc_root.metadata
+        self._current_metadata: NodeMetadata | None = root.metadata
         self._rendered_nodes: dict[int, Tree[Node].Node] = {}
         self._populated_toc_nodes: set[int] = set()
         self._toc_parents: dict[int, Node | None] = {}
         self._searchable_nodes: list[Node] = []
 
-        for node, parent in _walk_toc_nodes(toc_root):
+        for node, parent in _walk_toc_nodes(root):
             self._searchable_nodes.append(node)
             self._toc_parents[id(node)] = parent
 
@@ -609,10 +641,10 @@ class ClassificationViewer(App):
         yield Header(show_clock=True)
 
         # Tree
-        tree = Tree[Node](self._toc_root.metadata.label, id="toc-tree")
-        tree.root.data = self._toc_root
-        self._rendered_nodes[id(self._toc_root)] = tree.root
-        self._populate_tree_node(tree.root, self._toc_root)
+        tree = Tree[Node](self._root.metadata.label, id="toc-tree")
+        tree.root.data = self._root
+        self._rendered_nodes[id(self._root)] = tree.root
+        self._populate_tree_node(tree.root, self._root)
         tree.root.expand()
 
         # Search
@@ -623,7 +655,7 @@ class ClassificationViewer(App):
 
         # Description and URL
         metadata_text = Static("", id="metadata-text", markup=True)
-        metadata_text.update(self._format_metadata(self._toc_root.metadata))
+        metadata_text.update(self._format_metadata(self._root.metadata))
 
         # Layout
         with Horizontal():
@@ -639,7 +671,7 @@ class ClassificationViewer(App):
                         id="xref-select",
                     )
                     xref_values = Static("", id="xref-values", markup=True)
-                    xref_values.update(self._format_xref_values(self._toc_root.metadata, None))
+                    xref_values.update(self._format_xref_values(self._root.metadata, None))
                     yield xref_select
                     with VerticalScroll(id="xref-values-container"):
                         yield xref_values
@@ -815,7 +847,7 @@ class ClassificationViewer(App):
 
         parent_toc = self._toc_parents.get(id(toc_node))
         if parent_toc is None:
-            return self._rendered_nodes.get(id(self._toc_root))
+            return self._rendered_nodes.get(id(self._root))
 
         parent_node = self._ensure_tree_node(parent_toc)
         if parent_node is None:
@@ -929,6 +961,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip reading XRefs to improve XML parsing performance",
     )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Path to save a text-based tree representation of the hierarchy (for debugging)",
+    )
     return parser
 
 
@@ -939,10 +976,14 @@ def main() -> None:
     xml_path = Path(args.xml_file)
 
     try:
-        toc_root = parse_toc_xml(xml_path, include_xrefs=not args.exclude_xrefs)
+        root = parse_toc_xml(xml_path, include_xrefs=not args.exclude_xrefs)
     except (FileNotFoundError, ET.ParseError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    app = ClassificationViewer(toc_root, include_xrefs=not args.exclude_xrefs)
+    if args.output:
+        output_path = Path(args.output)
+        return root.output_flat(output_path)
+
+    app = ClassificationViewer(root, include_xrefs=not args.exclude_xrefs)
     app.run()
