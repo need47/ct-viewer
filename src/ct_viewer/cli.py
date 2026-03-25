@@ -59,7 +59,7 @@ class Node:
     metadata: NodeMetadata
     children: list["Node"] = field(default_factory=list)
 
-    def output_flat(self, output_path: Path | None = None) -> None:
+    def write_flat(self, output_path: Path | None = None) -> None:
         """Write the hierarchy as flat tab-delimited rows.
 
         Args:
@@ -83,7 +83,12 @@ class Node:
 
         node_id = self.metadata.node_id or ""
         parent_ids = "|".join(self.metadata.parent_ids)
-        lines = [f"{node_id}\t{parent_ids}\t{self.metadata.label}"]
+        xrefs = _serialize_flat_xrefs(self.metadata.xrefs)
+        fields = [node_id, parent_ids, self.metadata.label]
+        if xrefs:
+            fields.append(xrefs)
+
+        lines = ["\t".join(fields)]
         for child in self.children:
             lines.extend(child._iter_flat_lines())
 
@@ -387,6 +392,183 @@ def _stream_hierarchy(xml_path: Path, include_xrefs: bool) -> tuple[str, NodeMet
     return root_id, root_metadata, flat_nodes
 
 
+def _parse_flat_parent_ids(parent_text: str) -> list[str]:
+    """Parse serialized parent IDs from one flat hierarchy row.
+
+    Args:
+        parent_text: Raw parent-ID field from the flat file.
+
+    Returns:
+        list[str]: Parent IDs in file order.
+    """
+
+    if not parent_text:
+        return []
+
+    return [parent_id for value in parent_text.split("|") if (parent_id := value.strip())]
+
+
+def _parse_flat_xrefs(xrefs_text: str) -> dict[str, list[str]]:
+    """Parse serialized xrefs from one flat hierarchy row.
+
+    Args:
+        xrefs_text: Raw xref field from the flat file.
+
+    Returns:
+        dict[str, list[str]]: Xrefs grouped by type in input order.
+
+    Raises:
+        ValueError: If an xref value is missing the ``Type:Value`` structure.
+    """
+
+    grouped_values: dict[str, list[str]] = defaultdict(list)
+    if not xrefs_text:
+        return {}
+
+    for raw_value in xrefs_text.split("|"):
+        value = raw_value.strip()
+        if not value:
+            continue
+
+        xref_type, separator, xref_value = value.partition(":")
+        xref_type = xref_type.strip()
+        xref_value = xref_value.strip()
+        if not separator or not xref_type or not xref_value:
+            raise ValueError(f"Invalid XRef value: {value}")
+
+        grouped_values[xref_type].append(xref_value)
+
+    return dict(grouped_values)
+
+
+def _serialize_flat_xrefs(xrefs: dict[str, list[str]]) -> str:
+    """Serialize grouped xrefs into the flat-file fourth column.
+
+    Args:
+        xrefs: Xrefs grouped by type.
+
+    Returns:
+        str: Serialized ``Type:Value|Type:Value`` text.
+    """
+
+    values: list[str] = []
+    for xref_type, xref_values in xrefs.items():
+        for xref_value in xref_values:
+            values.append(f"{xref_type}:{xref_value}")
+
+    return "|".join(values)
+
+
+def _build_flat_subtree(
+    node_id: str,
+    nodes_by_id: dict[str, FlatNode],
+    children_by_parent: dict[str, list[str]],
+    active_path: set[str] | None = None,
+) -> Node:
+    """Construct one hierarchy subtree from flat node records.
+
+    Args:
+        node_id: Root node identifier for the subtree.
+        nodes_by_id: Parsed flat nodes indexed by ``NodeID``.
+        children_by_parent: Mapping of parent IDs to child node IDs.
+        active_path: Node IDs already visited on the current recursion path.
+
+    Returns:
+        Node: Rendered subtree rooted at ``node_id``.
+
+    Raises:
+        ValueError: If the flat hierarchy contains a cycle.
+    """
+
+    active_path = set() if active_path is None else active_path
+    if node_id in active_path:
+        cycle_path = " -> ".join([*active_path, node_id])
+        raise ValueError(f"Cycle detected in flat hierarchy: {cycle_path}")
+
+    record = nodes_by_id[node_id]
+    next_path = set(active_path)
+    next_path.add(node_id)
+    children = [
+        _build_flat_subtree(child_id, nodes_by_id, children_by_parent, next_path)
+        for child_id in children_by_parent.get(node_id, [])
+    ]
+    return Node(metadata=record.metadata, children=children)
+
+
+def read_flat(flat_path: Path, include_xrefs: bool = True) -> Node:
+    """Parse a flat tab-delimited hierarchy file into a tree structure.
+
+    Args:
+        flat_path: Path to input flat hierarchy file.
+        include_xrefs: Whether to parse optional ``XRefs`` values.
+
+    Returns:
+        Node: Root hierarchy node for the viewer.
+
+    Raises:
+        FileNotFoundError: If ``flat_path`` does not exist.
+        ValueError: If the file contains malformed rows, duplicate node IDs,
+            unknown parents, or cycles.
+    """
+
+    if not flat_path.exists():
+        raise FileNotFoundError(f"Flat hierarchy file not found: {flat_path}")
+
+    flat_nodes: list[FlatNode] = []
+    nodes_by_id: dict[str, FlatNode] = {}
+
+    for line_number, raw_line in enumerate(flat_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not raw_line.strip():
+            continue
+
+        parts = raw_line.split("\t")
+        if len(parts) not in {3, 4}:
+            raise ValueError(f"Line {line_number} must contain three or four tab-delimited fields")
+
+        node_id, parent_text, label = parts[:3]
+        if not node_id:
+            raise ValueError(f"Line {line_number} is missing NodeID")
+        if node_id in nodes_by_id:
+            raise ValueError(f"Duplicate NodeID on line {line_number}: {node_id}")
+
+        parent_ids = _parse_flat_parent_ids(parent_text)
+        xrefs = _parse_flat_xrefs(parts[3]) if include_xrefs and len(parts) == 4 else {}
+        metadata = NodeMetadata(
+            node_id=node_id,
+            parent_ids=parent_ids,
+            label=label or node_id,
+            xrefs=xrefs,
+        )
+        flat_node = FlatNode(node_id=node_id, parent_ids=parent_ids, metadata=metadata)
+        flat_nodes.append(flat_node)
+        nodes_by_id[node_id] = flat_node
+
+    if not flat_nodes:
+        raise ValueError("The flat hierarchy file does not contain any nodes")
+
+    children_by_parent: dict[str, list[str]] = defaultdict(list)
+    root_ids: list[str] = []
+    for node in flat_nodes:
+        if not node.parent_ids:
+            root_ids.append(node.node_id)
+            continue
+
+        for parent_id in node.parent_ids:
+            if parent_id not in nodes_by_id:
+                raise ValueError(f"Unknown parent ID for node {node.node_id}: {parent_id}")
+            children_by_parent[parent_id].append(node.node_id)
+
+    if not root_ids:
+        raise ValueError("The flat hierarchy file must contain at least one root node")
+
+    if len(root_ids) == 1:
+        return _build_flat_subtree(root_ids[0], nodes_by_id, children_by_parent)
+
+    synthetic_root = NodeMetadata(node_id="root", label="Hierarchy")
+    root_children = [_build_flat_subtree(root_id, nodes_by_id, children_by_parent) for root_id in root_ids]
+    return Node(metadata=synthetic_root, children=root_children)
+
+
 def _build_hierarchy_children(
     parent_id: str,
     children_by_parent: dict[str, list[str]],
@@ -429,7 +611,7 @@ def _build_hierarchy_children(
     return children
 
 
-def parse_toc_xml(xml_path: Path, include_xrefs: bool = True) -> Node:
+def read_xml(xml_path: Path, include_xrefs: bool = True) -> Node:
     """Parse a hierarchy XML file into a simple tree structure.
 
     Args:
@@ -479,7 +661,7 @@ def parse_toc_xml(xml_path: Path, include_xrefs: bool = True) -> Node:
     return Node(metadata=root_metadata, children=root_children)
 
 
-def _walk_toc_nodes(root: Node) -> Iterator[tuple[Node, Node | None]]:
+def _walk_nodes(root: Node) -> Iterator[tuple[Node, Node | None]]:
     """Yield tree nodes with their parent in depth-first order.
 
     Args:
@@ -497,7 +679,7 @@ def _walk_toc_nodes(root: Node) -> Iterator[tuple[Node, Node | None]]:
             stack.append((child, node))
 
 
-def _toc_label_text(node: Node) -> str:
+def _label_text(node: Node) -> str:
     """Return the display label for a parsed hierarchy node.
 
     Args:
@@ -570,7 +752,7 @@ def _expand_ancestors(node: Tree[Node].Node) -> None:
 class ClassificationViewer(App):
     """Textual application that renders hierarchy nodes in a tree widget."""
 
-    TITLE = "Classification Viewer"
+    TITLE = "PubChem Classification Viewer"
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("z", "expand_all", "Fold/Unfold"),
@@ -631,7 +813,7 @@ class ClassificationViewer(App):
         self._toc_parents: dict[int, Node | None] = {}
         self._searchable_nodes: list[Node] = []
 
-        for node, parent in _walk_toc_nodes(root):
+        for node, parent in _walk_nodes(root):
             self._searchable_nodes.append(node)
             self._toc_parents[id(node)] = parent
 
@@ -767,7 +949,7 @@ class ClassificationViewer(App):
 
         tree = self.query_one("#toc-tree", Tree)
         lowered = query.casefold()
-        matches = [node for node in self._searchable_nodes if lowered in _toc_label_text(node).casefold()]
+        matches = [node for node in self._searchable_nodes if lowered in _label_text(node).casefold()]
 
         if not matches:
             return
@@ -953,8 +1135,8 @@ class ClassificationViewer(App):
 def _build_argument_parser() -> argparse.ArgumentParser:
     """Create and configure the command-line argument parser."""
 
-    parser = argparse.ArgumentParser(description="Display classification XML as an interactive tree.")
-    parser.add_argument("xml_file", help="Path to the classification XML file")
+    parser = argparse.ArgumentParser(description="Display classification XML or flat hierarchy as an interactive tree.")
+    parser.add_argument("file", help="Path to the classification XML or flat hierarchy file")
     parser.add_argument(
         "-X",
         "--exclude-xrefs",
@@ -975,17 +1157,20 @@ def main() -> None:
     """Run the classification viewer TUI."""
 
     args = _build_argument_parser().parse_args()
-    xml_path = Path(args.xml_file)
+    file_path = Path(args.file)
 
     try:
-        root = parse_toc_xml(xml_path, include_xrefs=not args.exclude_xrefs)
+        if file_path.suffix.lower() == ".xml":
+            root = read_xml(file_path, include_xrefs=not args.exclude_xrefs)
+        else:
+            root = read_flat(file_path, include_xrefs=not args.exclude_xrefs)
     except (FileNotFoundError, ET.ParseError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
     if args.output:
         output_path = None if args.output == "-" else Path(args.output)
-        return root.output_flat(output_path)
+        return root.write_flat(output_path)
 
     app = ClassificationViewer(root, include_xrefs=not args.exclude_xrefs)
     app.run()
