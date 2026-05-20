@@ -757,6 +757,7 @@ class ClassificationViewer(App):
         ("q", "quit", "Quit"),
         ("z", "expand_all", "Fold/Unfold"),
         ("/", "search", "Search"),
+        ("t", "toggle_metadata", "Toggle Metadata"),
     ]
     CSS = """
         Horizontal {
@@ -808,6 +809,7 @@ class ClassificationViewer(App):
         self._search_results: list[Node] = []
         self._search_index = -1
         self._current_metadata: NodeMetadata | None = root.metadata
+        self._metadata_visible = True
         self._rendered_nodes: dict[int, Tree[Node].Node] = {}
         self._populated_toc_nodes: set[int] = set()
         self._toc_parents: dict[int, Node | None] = {}
@@ -861,6 +863,11 @@ class ClassificationViewer(App):
         # Footer
         yield Footer()
 
+    def on_mount(self) -> None:
+        """Apply the initial layout state after widgets are mounted."""
+
+        self._set_metadata_visibility(self._metadata_visible)
+
     def action_expand_all(self) -> None:
         """Toggle expanding or folding all descendants of the highlighted node."""
 
@@ -879,6 +886,12 @@ class ClassificationViewer(App):
         search_input = self.query_one("#search-input", Input)
         search_input.focus()
         search_input.cursor_position = len(search_input.value)
+
+    def action_toggle_metadata(self) -> None:
+        """Hide or show the metadata panel."""
+
+        self._metadata_visible = not self._metadata_visible
+        self._set_metadata_visibility(self._metadata_visible)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle submitted search input.
@@ -939,6 +952,18 @@ class ClassificationViewer(App):
         xref_values = self.query_one("#xref-values", Static)
         selected_type = None if event.value == Select.BLANK else str(event.value)
         xref_values.update(self._format_xref_values(self._current_metadata, selected_type))
+
+    def _set_metadata_visibility(self, visible: bool) -> None:
+        """Update the layout to reflect whether the metadata panel is shown.
+
+        Args:
+            visible: Whether the metadata panel should be visible.
+        """
+
+        tree = self.query_one("#toc-tree", Tree)
+        metadata_panel = self.query_one("#metadata-panel", Vertical)
+        metadata_panel.display = visible
+        tree.styles.width = "70%" if visible else "100%"
 
     def _run_search(self, query: str) -> None:
         """Search the tree for nodes containing the query and select the next match.
