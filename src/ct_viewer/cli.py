@@ -822,7 +822,7 @@ class ClassificationViewer(App):
     def compose(self) -> ComposeResult:
         """Compose top-level UI widgets."""
         # Header
-        yield Header(show_clock=True)
+        yield Header()
 
         # Tree
         tree = Tree[Node](self._root.metadata.label, id="toc-tree")
